@@ -20,3 +20,6 @@ config_private.h
 *.bin
 *.elf
 *.map
+
+# Personal notes
+GitHub_사용_정리_2026-05-22.txt
