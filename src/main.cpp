@@ -1,18 +1,26 @@
 #include <Arduino.h>
 
+const int LED_PIN = 10;
+
 void setup() {
   Serial.begin(115200);
-  delay(3000);
+  delay(1000);
 
-  Serial.println();
+  pinMode(LED_PIN, OUTPUT);
+
   Serial.println("=================================");
-  Serial.println("ESP32-S3 project started");
-  Serial.println("Embedded Water Tank Controller");
-  Serial.println("VERSION: SERIAL_TEST_003");
+  Serial.println("ESP32-S3 GPIO Output Test");
+  Serial.println("VERSION: LED_BLINK_001");
+  Serial.println("LED_PIN = GPIO10");
   Serial.println("=================================");
 }
 
 void loop() {
-  Serial.println("Running SERIAL_TEST_003...");
-  delay(1000);
+  digitalWrite(LED_PIN, HIGH);
+  Serial.println("GPIO10 HIGH - LED ON");
+  delay(2000);
+
+  digitalWrite(LED_PIN, LOW);
+  Serial.println("GPIO10 LOW - LED OFF");
+  delay(2000);
 }
