@@ -3,82 +3,83 @@
 /*
   ==================================================
   Project : Embedded Water Tank Controller
-  Step    : 5. millis() Timer Test
-  Version : MILLIS_TIMER_001
+  Step    : 4. Button to LED Control
+  Version : BUTTON_LED_CONTROL_001
   Board   : ESP32-S3 DevKitC-1
   Framework : Arduino / PlatformIO
   ==================================================
 
   목적:
-  - delay() 없이 LED를 2초 간격으로 깜빡인다.
-  - millis()를 사용하여 non-blocking timer 구조를 이해한다.
-  - 이후 Pump Delay Logic, Emergency Stop Logic의 기초로 사용한다.
+  - 버튼 입력을 읽어서 LED 출력을 제어한다.
+  - GPIO 입력 → 조건 판단 → GPIO 출력 구조를 이해한다.
+
+  회로:
+  - Button: GPIO4 ─ 버튼 ─ GND
+  - LED   : GPIO10 ─ 10kΩ 저항 ─ LED ─ GND
+
+  INPUT_PULLUP 방식:
+  - 버튼 안 누름 = HIGH
+  - 버튼 누름   = LOW
 */
+
+// 버튼 입력 핀
+const int BUTTON_PIN = 4;
 
 // LED 출력 핀
 const int LED_PIN = 10;
 
-// LED 상태 저장 변수
-// false = OFF, true = ON
-bool ledState = false;
-
-// 마지막으로 LED 상태가 바뀐 시간
-unsigned long previousMillis = 0;
-
-// LED 상태를 바꿀 시간 간격
-// 2000ms = 2초
-const unsigned long interval = 2000;
+// 이전 버튼 상태 저장용
+int lastButtonState = HIGH;
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
 
+  // 버튼은 내부 풀업 저항 사용
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+  // LED는 출력으로 사용
   pinMode(LED_PIN, OUTPUT);
 
-  // 초기 LED 상태는 OFF
+  // 초기 LED OFF
   digitalWrite(LED_PIN, LOW);
 
   Serial.println("=================================");
-  Serial.println("ESP32-S3 millis() Timer Test");
-  Serial.println("VERSION: MILLIS_TIMER_001");
-  Serial.println("LED_PIN = GPIO10");
-  Serial.println("INTERVAL = 2000ms");
+  Serial.println("ESP32-S3 Button to LED Control");
+  Serial.println("VERSION: BUTTON_LED_CONTROL_001");
+  Serial.println("BUTTON_PIN = GPIO4");
+  Serial.println("LED_PIN    = GPIO10");
+  Serial.println("INPUT MODE = INPUT_PULLUP");
   Serial.println("=================================");
-  Serial.println("delay() 없이 millis()로 LED를 제어합니다.");
+  Serial.println("Button released = LED OFF");
+  Serial.println("Button pressed  = LED ON");
 }
 
 void loop() {
-  // 현재 보드가 실행된 시간을 가져온다.
-  unsigned long currentMillis = millis();
+  // 현재 버튼 상태 읽기
+  int buttonState = digitalRead(BUTTON_PIN);
 
-  // 현재 시간 - 마지막 변경 시간이 interval 이상이면 실행
-  if (currentMillis - previousMillis >= interval) {
-    // 마지막 변경 시간을 현재 시간으로 갱신
-    previousMillis = currentMillis;
-
-    // LED 상태 반전
-    ledState = !ledState;
-
-    // 변경된 상태를 실제 GPIO에 출력
-    digitalWrite(LED_PIN, ledState ? HIGH : LOW);
-
-    // 상태 확인용 로그 출력
-    if (ledState) {
-      Serial.println("LED ON  - millis timer");
-    } else {
-      Serial.println("LED OFF - millis timer");
-    }
+  // 버튼이 눌린 상태: INPUT_PULLUP에서는 LOW
+  if (buttonState == LOW) {
+    digitalWrite(LED_PIN, HIGH);  // LED ON
+  } else {
+    digitalWrite(LED_PIN, LOW);   // LED OFF
   }
 
-  /*
-    여기에는 다른 작업을 계속 추가할 수 있다.
+  // 상태가 바뀔 때만 로그 출력
+  if (buttonState != lastButtonState) {
+    delay(50);  // 간단한 디바운스
 
-    예:
-    - 버튼 입력 확인
-    - Emergency 입력 확인
-    - 센서 상태 확인
-    - 상태머신 처리
+    buttonState = digitalRead(BUTTON_PIN);
 
-    delay()를 사용하지 않기 때문에 loop()가 멈추지 않는다.
-  */
+    if (buttonState != lastButtonState) {
+      lastButtonState = buttonState;
+
+      if (buttonState == LOW) {
+        Serial.println("BUTTON PRESSED  -> LED ON");
+      } else {
+        Serial.println("BUTTON RELEASED -> LED OFF");
+      }
+    }
+  }
 }
