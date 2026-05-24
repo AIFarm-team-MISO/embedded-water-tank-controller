@@ -2,40 +2,99 @@
 
 /*
   ==================================================
-  Project : Embedded Water Tank Controller
-  Step    : 7. Pump Delay Logic
-  Version : PUMP_DELAY_001
-  Board   : ESP32-S3 DevKitC-1
+  Project   : Embedded Water Tank Controller
+  Step      : 9. Full Water Tank Controller
+  Version   : FULL_WATER_TANK_004
+  Board     : ESP32-S3 DevKitC-1
   Framework : Arduino / PlatformIO
   ==================================================
 
   목적:
-  - 버튼 입력으로 펌프 동작 요청을 만든다.
-  - 요청 즉시 Pump ON 하지 않고, 일정 시간 대기 후 Pump ON 한다.
-  - millis() 기반 non-blocking timer를 State Machine에 적용한다.
+  - Start / Stop / LOW / HIGH / Emergency 입력을 통합한다.
+  - LOW Sensor 감지 후 Pump Delay를 거쳐 Pump ON 한다.
+  - HIGH Sensor 감지 시 Pump를 정지하고 FULL 상태로 전환한다.
+  - Emergency 입력은 어떤 상태에서도 최우선 처리한다.
+  - Emergency 버튼을 다시 누르면 IDLE 상태로 Reset한다.
+  - Emergency Reset 후 자동 재기동되지 않고, Start 버튼을 눌러야 다시 RUN 상태가 된다.
+  - 상태에 따라 LED를 제어하여 현재 시스템 상태를 눈으로 확인할 수 있게 한다.
 
-  회로:
-  - Button: GPIO4 ─ 버튼 ─ GND
-  - Pump LED: GPIO10 ─ 10kΩ 저항 ─ LED ─ GND
+  --------------------------------------------------
+  버튼 입력:
+  --------------------------------------------------
+  - START     : GPIO4  -> 버튼 -> GND
+  - STOP      : GPIO6  -> 버튼 -> GND
+  - EMERGENCY : GPIO5  -> 버튼 -> GND
+  - LOW       : GPIO7  -> 버튼 -> GND
+  - HIGH      : GPIO8  -> 버튼 -> GND
 
-  현재 테스트에서는 실제 펌프 대신 LED를 Pump 출력으로 사용한다.
+  모든 입력은 INPUT_PULLUP 방식이다.
 
-  상태:
-  - IDLE        : 대기 상태, Pump OFF
-  - PUMP_DELAY  : Pump ON 전 대기 상태, Pump OFF
-  - PUMP_ON     : Pump ON 상태, LED ON
+  INPUT_PULLUP:
+  - 버튼 안 누름 = HIGH
+  - 버튼 누름   = LOW
 
-  버튼 동작:
-  - IDLE에서 버튼 누름       → PUMP_DELAY
-  - PUMP_DELAY에서 버튼 누름 → IDLE, 타이머 취소
-  - PUMP_ON에서 버튼 누름    → IDLE, Pump OFF
+  --------------------------------------------------
+  LED 출력:
+  --------------------------------------------------
+  - LOW Sensor LED  : GPIO12 -> 저항 -> 파란 LED -> GND
+  - Pump LED        : GPIO10 -> 저항 -> 빨간 LED -> GND
+  - HIGH/FULL LED   : GPIO13 -> 저항 -> 흰색 LED -> GND
+  - Alarm LED       : GPIO11 -> 저항 -> 노란 LED -> GND
+
+  --------------------------------------------------
+  LED 의미:
+  --------------------------------------------------
+  - 파란 LED  : PUMP_DELAY 상태 표시
+  - 빨간 LED  : FILLING / Pump ON 상태 표시
+  - 흰색 LED  : FULL / 만수 상태 표시
+  - 노란 LED  : EMERGENCY / Alarm 상태 표시
+
+  --------------------------------------------------
+  상태 흐름:
+  --------------------------------------------------
+  IDLE
+    -> START
+  RUN
+    -> LOW Sensor
+  PUMP_DELAY
+    -> 3초 경과
+  FILLING
+    -> HIGH Sensor
+  FULL
+
+  어떤 상태에서든:
+    -> EMERGENCY 버튼
+  EMERGENCY
+
+  EMERGENCY 상태에서:
+    -> EMERGENCY 버튼 다시 누름
+  IDLE
+
+  이후:
+    -> START 버튼
+  RUN
 */
 
-// 버튼 입력 핀
-const int BUTTON_PIN = 4;
+// ==================================================
+// Pin Definition
+// ==================================================
 
-// 펌프 출력 대신 사용할 LED 핀
-const int PUMP_LED_PIN = 10;
+// 입력 핀
+const int START_BUTTON_PIN     = 4;   // 녹색 버튼
+const int STOP_BUTTON_PIN      = 6;   // 빨간 버튼
+const int EMERGENCY_BUTTON_PIN = 5;   // 노란 버튼
+const int LOW_SENSOR_PIN       = 7;   // 파란 버튼
+const int HIGH_SENSOR_PIN      = 8;   // 흰색 버튼
+
+// 출력 핀
+const int LOW_SENSOR_LED_PIN   = 12;  // 파란 LED: LOW 감지 / Pump Delay 표시
+const int PUMP_LED_PIN         = 10;  // 빨간 LED: Pump ON / Filling 표시
+const int HIGH_SENSOR_LED_PIN  = 13;  // 흰색 LED: Full 표시
+const int ALARM_LED_PIN        = 11;  // 노란 LED: Emergency / Alarm 표시
+
+// ==================================================
+// Timing Settings
+// ==================================================
 
 // 버튼 디바운스 시간
 const unsigned long DEBOUNCE_DELAY = 50;
@@ -43,11 +102,17 @@ const unsigned long DEBOUNCE_DELAY = 50;
 // Pump ON 전 대기 시간
 const unsigned long PUMP_DELAY_TIME = 3000;  // 3000ms = 3초
 
-// 시스템 상태 정의
+// ==================================================
+// State Definition
+// ==================================================
+
 enum SystemState {
-  STATE_IDLE,
-  STATE_PUMP_DELAY,
-  STATE_PUMP_ON
+  STATE_IDLE,        // 대기 상태
+  STATE_RUN,         // 운전 상태, 센서 감시
+  STATE_PUMP_DELAY,  // LOW 감지 후 Pump ON 전 대기
+  STATE_FILLING,     // Pump ON, 물 채우는 상태
+  STATE_FULL,        // HIGH 감지, 만수 상태
+  STATE_EMERGENCY    // 비상 정지 상태
 };
 
 // 현재 시스템 상태
@@ -56,90 +121,126 @@ SystemState currentState = STATE_IDLE;
 // Pump Delay 시작 시간
 unsigned long pumpDelayStartTime = 0;
 
-// 버튼 디바운스용 변수
-int lastRawButtonState = HIGH;
-int stableButtonState = HIGH;
-unsigned long lastDebounceTime = 0;
+// ==================================================
+// Input Structure
+// ==================================================
 
 /*
-  현재 상태 이름을 문자열로 반환한다.
-  Serial Monitor 로그를 보기 쉽게 하기 위한 함수이다.
+  버튼과 센서 입력을 같은 구조로 관리하기 위한 구조체
+
+  pin:
+  - 입력이 연결된 GPIO 번호
+
+  name:
+  - Serial Monitor에 출력할 입력 이름
+
+  lastRawState:
+  - 마지막으로 읽은 원시 입력값
+
+  stableState:
+  - 디바운스 후 확정된 입력값
+
+  lastDebounceTime:
+  - 입력값이 마지막으로 바뀐 시간
+
+  pressedEvent:
+  - 새로 눌린 순간 true
+
+  releasedEvent:
+  - 새로 떼어진 순간 true
+*/
+struct InputState {
+  int pin;
+  const char* name;
+  int lastRawState;
+  int stableState;
+  unsigned long lastDebounceTime;
+  bool pressedEvent;
+  bool releasedEvent;
+};
+
+// 입력 객체 생성
+InputState startButton = {
+  START_BUTTON_PIN,
+  "START",
+  HIGH,
+  HIGH,
+  0,
+  false,
+  false
+};
+
+InputState stopButton = {
+  STOP_BUTTON_PIN,
+  "STOP",
+  HIGH,
+  HIGH,
+  0,
+  false,
+  false
+};
+
+InputState emergencyButton = {
+  EMERGENCY_BUTTON_PIN,
+  "EMERGENCY",
+  HIGH,
+  HIGH,
+  0,
+  false,
+  false
+};
+
+InputState lowSensor = {
+  LOW_SENSOR_PIN,
+  "LOW_SENSOR",
+  HIGH,
+  HIGH,
+  0,
+  false,
+  false
+};
+
+InputState highSensor = {
+  HIGH_SENSOR_PIN,
+  "HIGH_SENSOR",
+  HIGH,
+  HIGH,
+  0,
+  false,
+  false
+};
+
+// ==================================================
+// Utility Functions
+// ==================================================
+
+/*
+  현재 상태를 문자열로 변환한다.
+  Serial Monitor에서 상태 변화를 확인하기 쉽게 하기 위한 함수이다.
 */
 const char* getStateName(SystemState state) {
   switch (state) {
     case STATE_IDLE:
       return "IDLE";
+    case STATE_RUN:
+      return "RUN";
     case STATE_PUMP_DELAY:
       return "PUMP_DELAY";
-    case STATE_PUMP_ON:
-      return "PUMP_ON";
+    case STATE_FILLING:
+      return "FILLING";
+    case STATE_FULL:
+      return "FULL";
+    case STATE_EMERGENCY:
+      return "EMERGENCY";
     default:
       return "UNKNOWN";
   }
 }
 
-void setup() {
-  Serial.begin(115200);
-  delay(1000);
-
-  // 버튼은 내부 풀업 저항 사용
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
-
-  // Pump LED는 출력으로 사용
-  pinMode(PUMP_LED_PIN, OUTPUT);
-
-  // 초기 상태는 Pump OFF
-  digitalWrite(PUMP_LED_PIN, LOW);
-
-  Serial.println("=================================");
-  Serial.println("ESP32-S3 Pump Delay Logic Test");
-  Serial.println("VERSION: PUMP_DELAY_001");
-  Serial.println("BUTTON_PIN   = GPIO4");
-  Serial.println("PUMP_LED_PIN = GPIO10");
-  Serial.println("PUMP_DELAY   = 3000ms");
-  Serial.println("=================================");
-  Serial.println("Initial State: IDLE");
-  Serial.println("Press button: IDLE -> PUMP_DELAY -> PUMP_ON");
-  Serial.println("Press again : Stop and return to IDLE");
-}
-
 /*
-  버튼이 새로 눌린 순간만 감지하는 함수
+  상태 변경 함수
 
-  INPUT_PULLUP 방식:
-  - 버튼 안 누름 = HIGH
-  - 버튼 누름   = LOW
-
-  버튼을 계속 누르고 있어도 한 번만 true를 반환한다.
-*/
-bool isButtonPressedEvent() {
-  int rawButtonState = digitalRead(BUTTON_PIN);
-
-  // 버튼 원시 값이 바뀌면 디바운스 타이머 갱신
-  if (rawButtonState != lastRawButtonState) {
-    lastDebounceTime = millis();
-    lastRawButtonState = rawButtonState;
-  }
-
-  // 값이 일정 시간 동안 안정되었는지 확인
-  if (millis() - lastDebounceTime >= DEBOUNCE_DELAY) {
-    if (rawButtonState != stableButtonState) {
-      stableButtonState = rawButtonState;
-
-      // 버튼이 눌린 순간만 이벤트로 처리
-      if (stableButtonState == LOW) {
-        return true;
-      }
-    }
-  }
-
-  return false;
-}
-
-/*
-  상태를 변경하는 함수
-
-  상태가 바뀔 때마다 로그를 출력한다.
+  상태가 실제로 바뀔 때만 로그를 출력한다.
 */
 void changeState(SystemState newState) {
   if (currentState != newState) {
@@ -153,73 +254,424 @@ void changeState(SystemState newState) {
 }
 
 /*
-  버튼 입력에 따른 상태 전환 처리
-*/
-void handleButtonEvent() {
-  if (isButtonPressedEvent()) {
+  현재 입력이 눌린 상태인지 확인한다.
 
-    if (currentState == STATE_IDLE) {
-      // IDLE에서 버튼을 누르면 Pump Delay 시작
-      pumpDelayStartTime = millis();
-      changeState(STATE_PUMP_DELAY);
-      Serial.println("Pump delay timer started.");
-    }
-    else {
-      // PUMP_DELAY 또는 PUMP_ON 상태에서 버튼을 누르면 정지
-      changeState(STATE_IDLE);
-      Serial.println("Pump stopped by button.");
+  INPUT_PULLUP 방식에서는:
+  - 눌림 = LOW
+  - 안 눌림 = HIGH
+*/
+bool isPressed(InputState &input) {
+  return input.stableState == LOW;
+}
+
+// ==================================================
+// Input Update
+// ==================================================
+
+/*
+  입력 상태 업데이트 함수
+
+  역할:
+  - GPIO 입력값을 읽는다.
+  - 디바운스를 처리한다.
+  - 새로 눌린 순간 pressedEvent를 true로 만든다.
+  - 새로 떼어진 순간 releasedEvent를 true로 만든다.
+
+  이 함수 덕분에 버튼을 계속 누르고 있어도
+  pressedEvent는 한 번만 발생한다.
+*/
+void updateInput(InputState &input) {
+  input.pressedEvent = false;
+  input.releasedEvent = false;
+
+  int rawState = digitalRead(input.pin);
+
+  // 원시 입력값이 바뀌면 디바운스 타이머 갱신
+  if (rawState != input.lastRawState) {
+    input.lastDebounceTime = millis();
+    input.lastRawState = rawState;
+  }
+
+  // 일정 시간 동안 값이 안정적으로 유지되었을 때만 실제 상태로 인정
+  if (millis() - input.lastDebounceTime >= DEBOUNCE_DELAY) {
+    if (rawState != input.stableState) {
+      input.stableState = rawState;
+
+      if (input.stableState == LOW) {
+        input.pressedEvent = true;
+        Serial.print("INPUT: ");
+        Serial.print(input.name);
+        Serial.println(" PRESSED");
+      } else {
+        input.releasedEvent = true;
+        Serial.print("INPUT: ");
+        Serial.print(input.name);
+        Serial.println(" RELEASED");
+      }
     }
   }
 }
 
 /*
-  Pump Delay 타이머 처리
+  모든 입력을 한 번씩 업데이트한다.
+*/
+void updateAllInputs() {
+  updateInput(startButton);
+  updateInput(stopButton);
+  updateInput(emergencyButton);
+  updateInput(lowSensor);
+  updateInput(highSensor);
+}
 
-  PUMP_DELAY 상태에서 3초가 지나면 PUMP_ON 상태로 변경한다.
-  delay()를 사용하지 않기 때문에 loop()는 멈추지 않는다.
+/*
+  setup()에서 입력의 실제 초기 상태를 코드 내부 상태와 동기화한다.
+
+  보드가 시작될 때 버튼이 눌려 있거나,
+  배선 상태가 HIGH/LOW 중 하나로 고정되어 있을 수 있으므로,
+  실제 값을 한 번 읽어서 stableState에 반영한다.
+*/
+void initializeInput(InputState &input) {
+  input.lastRawState = digitalRead(input.pin);
+  input.stableState = input.lastRawState;
+  input.lastDebounceTime = millis();
+  input.pressedEvent = false;
+  input.releasedEvent = false;
+}
+
+// ==================================================
+// Emergency Logic
+// ==================================================
+
+/*
+  Emergency 처리 함수
+
+  동작:
+  1. 일반 상태에서 Emergency 버튼을 누르면 EMERGENCY 상태로 전환
+  2. EMERGENCY 상태에서 Emergency 버튼을 다시 누르면 IDLE 상태로 Reset
+
+  중요한 점:
+  - Emergency Reset은 RUN으로 복귀하지 않는다.
+  - Reset 후에는 반드시 START 버튼을 눌러야 다시 운전한다.
+*/
+void handleEmergency() {
+  if (!emergencyButton.pressedEvent) {
+    return;
+  }
+
+  // 일반 상태에서 Emergency 버튼을 누르면 비상 정지
+  if (currentState != STATE_EMERGENCY) {
+    changeState(STATE_EMERGENCY);
+    Serial.println("!!! EMERGENCY STOP TRIGGERED !!!");
+    Serial.println("Pump OFF, Alarm ON");
+    Serial.println("Press Emergency again to reset to IDLE.");
+    return;
+  }
+
+  // EMERGENCY 상태에서 Emergency 버튼을 다시 누르면 IDLE로 Reset
+  changeState(STATE_IDLE);
+  Serial.println("Emergency reset by Emergency button.");
+  Serial.println("System returned to IDLE.");
+  Serial.println("Press Start to run system.");
+}
+
+// ==================================================
+// Stop Logic
+// ==================================================
+
+/*
+  Stop 처리 함수
+
+  Emergency가 아닌 상태에서 Stop 버튼을 누르면 IDLE로 복귀한다.
+
+  Stop은 일반 정지 명령이다.
+  EMERGENCY 상태에서는 Emergency 버튼으로 Reset한다.
+*/
+void handleStop() {
+  if (stopButton.pressedEvent && currentState != STATE_EMERGENCY) {
+    changeState(STATE_IDLE);
+    Serial.println("System stopped. Return to IDLE.");
+  }
+}
+
+// ==================================================
+// Start Logic
+// ==================================================
+
+/*
+  Start 처리 함수
+
+  동작:
+  - IDLE 상태에서 Start 버튼을 누르면 RUN 상태로 전환
+  - FULL 상태에서 Start 버튼을 누르면 RUN 상태로 재개
+  - EMERGENCY 상태에서는 Start 버튼으로 시작할 수 없음
+
+  Emergency 이후에는:
+  1. Emergency 버튼을 다시 눌러 IDLE로 Reset
+  2. 그 다음 Start 버튼을 눌러 RUN 시작
+*/
+void handleStart() {
+  if (!startButton.pressedEvent) {
+    return;
+  }
+
+  // Emergency 상태에서는 Start 금지
+  if (currentState == STATE_EMERGENCY) {
+    Serial.println("Cannot start: System is in EMERGENCY state.");
+    Serial.println("Press Emergency button again to reset.");
+    return;
+  }
+
+  // IDLE에서 Start
+  if (currentState == STATE_IDLE) {
+    changeState(STATE_RUN);
+    Serial.println("System started. Monitoring level sensors.");
+    return;
+  }
+
+  // FULL 상태에서 다시 운전 재개
+  if (currentState == STATE_FULL) {
+    changeState(STATE_RUN);
+    Serial.println("System restarted from FULL. Monitoring level sensors.");
+    return;
+  }
+}
+
+// ==================================================
+// Level Sensor Logic
+// ==================================================
+
+/*
+  수위 센서 처리 함수
+
+  HIGH Sensor:
+  - 물이 가득 찼다는 의미
+  - Pump를 꺼야 하므로 우선 처리한다.
+
+  LOW Sensor:
+  - 물이 부족하다는 의미
+  - RUN 또는 FULL 상태에서 감지되면 PUMP_DELAY로 전환한다.
+*/
+void handleLevelSensors() {
+  bool lowDetected = isPressed(lowSensor);
+  bool highDetected = isPressed(highSensor);
+
+  // HIGH Sensor는 Pump OFF 조건이므로 우선 처리
+  if (highDetected) {
+    if (currentState == STATE_RUN ||
+        currentState == STATE_PUMP_DELAY ||
+        currentState == STATE_FILLING) {
+      changeState(STATE_FULL);
+      Serial.println("HIGH level detected. Pump OFF. Tank FULL.");
+      return;
+    }
+  }
+
+  // LOW Sensor 감지 시 Pump Delay 시작
+  if (lowDetected) {
+    if (currentState == STATE_RUN || currentState == STATE_FULL) {
+      pumpDelayStartTime = millis();
+      changeState(STATE_PUMP_DELAY);
+      Serial.println("LOW level detected. Pump delay timer started.");
+      return;
+    }
+  }
+}
+
+// ==================================================
+// Pump Delay Logic
+// ==================================================
+
+/*
+  Pump Delay 처리 함수
+
+  PUMP_DELAY 상태에서 3초가 지나면 FILLING 상태로 전환한다.
+
+  delay()를 사용하지 않고 millis()로 시간을 비교하므로,
+  Pump Delay 중에도 Emergency나 Stop 입력을 즉시 처리할 수 있다.
 */
 void handlePumpDelay() {
   if (currentState == STATE_PUMP_DELAY) {
     unsigned long currentMillis = millis();
 
     if (currentMillis - pumpDelayStartTime >= PUMP_DELAY_TIME) {
-      changeState(STATE_PUMP_ON);
-      Serial.println("Pump delay completed. Pump ON.");
+      changeState(STATE_FILLING);
+      Serial.println("Pump delay completed. Pump ON. Filling started.");
     }
   }
 }
 
-/*
-  현재 상태에 따라 Pump LED 출력을 제어한다.
+// ==================================================
+// Output Logic
+// ==================================================
 
-  STATE_PUMP_ON 상태에서만 LED ON
-  나머지 상태에서는 LED OFF
+/*
+  상태에 따른 LED 출력 제어
+
+  LED는 버튼 입력 자체보다 시스템 상태를 표시하는 용도로 사용한다.
+
+  - IDLE        : 모든 LED OFF
+  - RUN         : 모든 LED OFF
+  - PUMP_DELAY  : 파란 LED ON
+  - FILLING     : 빨간 LED ON
+  - FULL        : 흰색 LED ON
+  - EMERGENCY   : 노란 LED ON
 */
 void updateOutputs() {
-  if (currentState == STATE_PUMP_ON) {
-    digitalWrite(PUMP_LED_PIN, HIGH);  // Pump ON
-  } else {
-    digitalWrite(PUMP_LED_PIN, LOW);   // Pump OFF
-  }
+  // 파란 LED: PUMP_DELAY 상태 표시
+  digitalWrite(
+    LOW_SENSOR_LED_PIN,
+    currentState == STATE_PUMP_DELAY ? HIGH : LOW
+  );
+
+  // 빨간 LED: Pump ON / FILLING 상태 표시
+  digitalWrite(
+    PUMP_LED_PIN,
+    currentState == STATE_FILLING ? HIGH : LOW
+  );
+
+  // 흰색 LED: FULL 상태 표시
+  digitalWrite(
+    HIGH_SENSOR_LED_PIN,
+    currentState == STATE_FULL ? HIGH : LOW
+  );
+
+  // 노란 LED: EMERGENCY / Alarm 상태 표시
+  digitalWrite(
+    ALARM_LED_PIN,
+    currentState == STATE_EMERGENCY ? HIGH : LOW
+  );
 }
 
-void loop() {
-  // 1. 버튼 입력 확인
-  handleButtonEvent();
+// ==================================================
+// Setup
+// ==================================================
 
-  // 2. Pump Delay 타이머 확인
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  // 입력 핀 설정
+  pinMode(START_BUTTON_PIN, INPUT_PULLUP);
+  pinMode(STOP_BUTTON_PIN, INPUT_PULLUP);
+  pinMode(EMERGENCY_BUTTON_PIN, INPUT_PULLUP);
+  pinMode(LOW_SENSOR_PIN, INPUT_PULLUP);
+  pinMode(HIGH_SENSOR_PIN, INPUT_PULLUP);
+
+  // 출력 핀 설정
+  pinMode(LOW_SENSOR_LED_PIN, OUTPUT);
+  pinMode(PUMP_LED_PIN, OUTPUT);
+  pinMode(HIGH_SENSOR_LED_PIN, OUTPUT);
+  pinMode(ALARM_LED_PIN, OUTPUT);
+
+  // 출력 초기화
+  digitalWrite(LOW_SENSOR_LED_PIN, LOW);
+  digitalWrite(PUMP_LED_PIN, LOW);
+  digitalWrite(HIGH_SENSOR_LED_PIN, LOW);
+  digitalWrite(ALARM_LED_PIN, LOW);
+
+  // 입력 초기 상태 동기화
+  initializeInput(startButton);
+  initializeInput(stopButton);
+  initializeInput(emergencyButton);
+  initializeInput(lowSensor);
+  initializeInput(highSensor);
+
+  // 시작 로그 출력
+  Serial.println("=================================");
+  Serial.println("ESP32-S3 Full Water Tank Controller");
+  Serial.println("VERSION: FULL_WATER_TANK_004");
+  Serial.println("=================================");
+
+  Serial.println("[INPUT]");
+  Serial.println("START     = GPIO4");
+  Serial.println("STOP      = GPIO6");
+  Serial.println("EMERGENCY = GPIO5");
+  Serial.println("LOW       = GPIO7");
+  Serial.println("HIGH      = GPIO8");
+
+  Serial.println("---------------------------------");
+
+  Serial.println("[OUTPUT]");
+  Serial.println("LOW LED   = GPIO12");
+  Serial.println("PUMP LED  = GPIO10");
+  Serial.println("HIGH LED  = GPIO13");
+  Serial.println("ALARM LED = GPIO11");
+
+  Serial.println("---------------------------------");
+
+  Serial.println("PUMP_DELAY = 3000ms");
+  Serial.println("Initial State: IDLE");
+
+  Serial.println("---------------------------------");
+
+  Serial.println("[FLOW]");
+  Serial.println("IDLE -> START -> RUN");
+  Serial.println("RUN -> LOW -> PUMP_DELAY");
+  Serial.println("PUMP_DELAY -> 3s -> FILLING");
+  Serial.println("FILLING -> HIGH -> FULL");
+  Serial.println("Any state -> EMERGENCY");
+  Serial.println("EMERGENCY -> Emergency again -> IDLE");
+  Serial.println("IDLE -> START -> RUN");
+
+  Serial.println("=================================");
+}
+
+// ==================================================
+// Main Loop
+// ==================================================
+
+void loop() {
+  // 1. 모든 입력 상태 업데이트
+  updateAllInputs();
+
+  // 2. Emergency는 항상 최우선 처리
+  handleEmergency();
+
+  /*
+    Emergency 상태에서는 일반 로직을 실행하지 않는다.
+
+    단, handleEmergency()에서 Emergency 버튼이 다시 눌리면
+    STATE_IDLE로 Reset될 수 있다.
+
+    currentState가 여전히 EMERGENCY라면
+    Pump OFF / Alarm ON 상태를 유지하고 loop를 종료한다.
+  */
+  if (currentState == STATE_EMERGENCY) {
+    updateOutputs();
+    return;
+  }
+
+  // 3. Stop 처리
+  handleStop();
+
+  // 4. Start 처리
+  handleStart();
+
+  // 5. 수위 센서 처리
+  handleLevelSensors();
+
+  // 6. Pump Delay 타이머 처리
   handlePumpDelay();
 
-  // 3. 현재 상태에 맞게 출력 갱신
+  // 7. 현재 상태에 따라 출력 갱신
   updateOutputs();
 
   /*
-    이 구조에서는 delay()를 사용하지 않는다.
+    전체 처리 우선순위:
 
-    따라서 PUMP_DELAY 상태로 3초를 기다리는 동안에도
-    loop()는 계속 반복된다.
+    1. 입력 업데이트
+    2. Emergency 처리
+    3. Emergency 상태 유지 또는 Reset
+    4. Stop 처리
+    5. Start 처리
+    6. Level Sensor 처리
+    7. Pump Delay 처리
+    8. Output 처리
 
-    이후 Emergency Stop 입력을 추가하면,
-    Pump Delay 진행 중에도 즉시 정지할 수 있다.
+    핵심 안전 조건:
+    - Emergency 상태에서는 Pump가 항상 OFF
+    - Emergency 상태에서는 Alarm이 항상 ON
+    - Emergency Reset 후에는 IDLE로만 복귀
+    - 재운전은 반드시 Start 버튼으로 수행
   */
 }
