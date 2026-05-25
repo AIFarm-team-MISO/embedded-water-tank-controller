@@ -4,7 +4,7 @@
   ==================================================
   Project   : Embedded Water Tank Controller
   Step      : 9. Full Water Tank Controller
-  Version   : FULL_WATER_TANK_004
+  Version   : FULL_WATER_TANK_005
   Board     : ESP32-S3 DevKitC-1
   Framework : Arduino / PlatformIO
   ==================================================
@@ -16,7 +16,7 @@
   - Emergency 입력은 어떤 상태에서도 최우선 처리한다.
   - Emergency 버튼을 다시 누르면 IDLE 상태로 Reset한다.
   - Emergency Reset 후 자동 재기동되지 않고, Start 버튼을 눌러야 다시 RUN 상태가 된다.
-  - 상태에 따라 LED를 제어하여 현재 시스템 상태를 눈으로 확인할 수 있게 한다.
+  - 영상 촬영용으로 Serial Monitor 로그를 간결하게 출력한다.
 
   --------------------------------------------------
   버튼 입력:
@@ -38,7 +38,7 @@
   --------------------------------------------------
   - LOW Sensor LED  : GPIO12 -> 저항 -> 파란 LED -> GND
   - Pump LED        : GPIO10 -> 저항 -> 빨간 LED -> GND
-  - HIGH/FULL LED   : GPIO13 -> 저항 -> 흰색 LED -> GND
+  - HIGH / FULL LED : GPIO13 -> 저항 -> 흰색 LED -> GND
   - Alarm LED       : GPIO11 -> 저항 -> 노란 LED -> GND
 
   --------------------------------------------------
@@ -76,6 +76,14 @@
 */
 
 // ==================================================
+// Debug Settings
+// ==================================================
+
+// 영상 촬영용 기본값: false
+// 버튼 눌림/뗌 로그까지 확인하고 싶으면 true로 변경
+const bool DEBUG_INPUT_LOG = false;
+
+// ==================================================
 // Pin Definition
 // ==================================================
 
@@ -87,7 +95,7 @@ const int LOW_SENSOR_PIN       = 7;   // 파란 버튼
 const int HIGH_SENSOR_PIN      = 8;   // 흰색 버튼
 
 // 출력 핀
-const int LOW_SENSOR_LED_PIN   = 12;  // 파란 LED: LOW 감지 / Pump Delay 표시
+const int LOW_SENSOR_LED_PIN   = 12;  // 파란 LED: Pump Delay 표시
 const int PUMP_LED_PIN         = 10;  // 빨간 LED: Pump ON / Filling 표시
 const int HIGH_SENSOR_LED_PIN  = 13;  // 흰색 LED: Full 표시
 const int ALARM_LED_PIN        = 11;  // 노란 LED: Emergency / Alarm 표시
@@ -132,7 +140,7 @@ unsigned long pumpDelayStartTime = 0;
   - 입력이 연결된 GPIO 번호
 
   name:
-  - Serial Monitor에 출력할 입력 이름
+  - 디버그 로그에 출력할 입력 이름
 
   lastRawState:
   - 마지막으로 읽은 원시 입력값
@@ -238,16 +246,32 @@ const char* getStateName(SystemState state) {
 }
 
 /*
-  상태 변경 함수
+  영상 촬영용 상태 변경 로그 함수
 
-  상태가 실제로 바뀔 때만 로그를 출력한다.
+  출력 형식:
+  [EVENT] OLD_STATE -> NEW_STATE
+    - Message
+
+  예:
+  [LOW] RUN -> PUMP_DELAY
+    - Pump delay started: 3000ms.
 */
-void changeState(SystemState newState) {
+void changeState(SystemState newState, const char* eventName, const char* message) {
   if (currentState != newState) {
-    Serial.print("STATE CHANGE: ");
+    Serial.println();
+
+    Serial.print("[");
+    Serial.print(eventName);
+    Serial.print("] ");
+
     Serial.print(getStateName(currentState));
     Serial.print(" -> ");
     Serial.println(getStateName(newState));
+
+    if (message != nullptr) {
+      Serial.print("  - ");
+      Serial.println(message);
+    }
 
     currentState = newState;
   }
@@ -277,8 +301,8 @@ bool isPressed(InputState &input) {
   - 새로 눌린 순간 pressedEvent를 true로 만든다.
   - 새로 떼어진 순간 releasedEvent를 true로 만든다.
 
-  이 함수 덕분에 버튼을 계속 누르고 있어도
-  pressedEvent는 한 번만 발생한다.
+  영상용 기본 모드에서는 입력 로그를 출력하지 않는다.
+  DEBUG_INPUT_LOG를 true로 바꾸면 PRESSED / RELEASED 로그를 확인할 수 있다.
 */
 void updateInput(InputState &input) {
   input.pressedEvent = false;
@@ -299,14 +323,20 @@ void updateInput(InputState &input) {
 
       if (input.stableState == LOW) {
         input.pressedEvent = true;
-        Serial.print("INPUT: ");
-        Serial.print(input.name);
-        Serial.println(" PRESSED");
+
+        if (DEBUG_INPUT_LOG) {
+          Serial.print("DEBUG INPUT: ");
+          Serial.print(input.name);
+          Serial.println(" PRESSED");
+        }
       } else {
         input.releasedEvent = true;
-        Serial.print("INPUT: ");
-        Serial.print(input.name);
-        Serial.println(" RELEASED");
+
+        if (DEBUG_INPUT_LOG) {
+          Serial.print("DEBUG INPUT: ");
+          Serial.print(input.name);
+          Serial.println(" RELEASED");
+        }
       }
     }
   }
@@ -360,18 +390,20 @@ void handleEmergency() {
 
   // 일반 상태에서 Emergency 버튼을 누르면 비상 정지
   if (currentState != STATE_EMERGENCY) {
-    changeState(STATE_EMERGENCY);
-    Serial.println("!!! EMERGENCY STOP TRIGGERED !!!");
-    Serial.println("Pump OFF, Alarm ON");
-    Serial.println("Press Emergency again to reset to IDLE.");
+    changeState(
+      STATE_EMERGENCY,
+      "EMERGENCY",
+      "Pump OFF / Alarm ON"
+    );
     return;
   }
 
   // EMERGENCY 상태에서 Emergency 버튼을 다시 누르면 IDLE로 Reset
-  changeState(STATE_IDLE);
-  Serial.println("Emergency reset by Emergency button.");
-  Serial.println("System returned to IDLE.");
-  Serial.println("Press Start to run system.");
+  changeState(
+    STATE_IDLE,
+    "RESET",
+    "Emergency reset. Press START to run system."
+  );
 }
 
 // ==================================================
@@ -382,14 +414,15 @@ void handleEmergency() {
   Stop 처리 함수
 
   Emergency가 아닌 상태에서 Stop 버튼을 누르면 IDLE로 복귀한다.
-
   Stop은 일반 정지 명령이다.
-  EMERGENCY 상태에서는 Emergency 버튼으로 Reset한다.
 */
 void handleStop() {
   if (stopButton.pressedEvent && currentState != STATE_EMERGENCY) {
-    changeState(STATE_IDLE);
-    Serial.println("System stopped. Return to IDLE.");
+    changeState(
+      STATE_IDLE,
+      "STOP",
+      "System stopped. All outputs OFF."
+    );
   }
 }
 
@@ -416,22 +449,30 @@ void handleStart() {
 
   // Emergency 상태에서는 Start 금지
   if (currentState == STATE_EMERGENCY) {
-    Serial.println("Cannot start: System is in EMERGENCY state.");
-    Serial.println("Press Emergency button again to reset.");
+    Serial.println();
+    Serial.println("[START] Blocked");
+    Serial.println("  - System is in EMERGENCY state.");
+    Serial.println("  - Press EMERGENCY again to reset.");
     return;
   }
 
   // IDLE에서 Start
   if (currentState == STATE_IDLE) {
-    changeState(STATE_RUN);
-    Serial.println("System started. Monitoring level sensors.");
+    changeState(
+      STATE_RUN,
+      "START",
+      "Monitoring level sensors."
+    );
     return;
   }
 
   // FULL 상태에서 다시 운전 재개
   if (currentState == STATE_FULL) {
-    changeState(STATE_RUN);
-    Serial.println("System restarted from FULL. Monitoring level sensors.");
+    changeState(
+      STATE_RUN,
+      "START",
+      "Restarted from FULL. Monitoring level sensors."
+    );
     return;
   }
 }
@@ -460,8 +501,11 @@ void handleLevelSensors() {
     if (currentState == STATE_RUN ||
         currentState == STATE_PUMP_DELAY ||
         currentState == STATE_FILLING) {
-      changeState(STATE_FULL);
-      Serial.println("HIGH level detected. Pump OFF. Tank FULL.");
+      changeState(
+        STATE_FULL,
+        "HIGH",
+        "Tank FULL. Pump OFF."
+      );
       return;
     }
   }
@@ -470,8 +514,12 @@ void handleLevelSensors() {
   if (lowDetected) {
     if (currentState == STATE_RUN || currentState == STATE_FULL) {
       pumpDelayStartTime = millis();
-      changeState(STATE_PUMP_DELAY);
-      Serial.println("LOW level detected. Pump delay timer started.");
+
+      changeState(
+        STATE_PUMP_DELAY,
+        "LOW",
+        "Pump delay started: 3000ms."
+      );
       return;
     }
   }
@@ -494,8 +542,11 @@ void handlePumpDelay() {
     unsigned long currentMillis = millis();
 
     if (currentMillis - pumpDelayStartTime >= PUMP_DELAY_TIME) {
-      changeState(STATE_FILLING);
-      Serial.println("Pump delay completed. Pump ON. Filling started.");
+      changeState(
+        STATE_FILLING,
+        "TIMER",
+        "Pump ON. Filling started."
+      );
     }
   }
 }
@@ -579,7 +630,7 @@ void setup() {
   // 시작 로그 출력
   Serial.println("=================================");
   Serial.println("ESP32-S3 Full Water Tank Controller");
-  Serial.println("VERSION: FULL_WATER_TANK_004");
+  Serial.println("VERSION: FULL_WATER_TANK_005");
   Serial.println("=================================");
 
   Serial.println("[INPUT]");
